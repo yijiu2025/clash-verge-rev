@@ -40,7 +40,9 @@
       "speedCheckCancel": "Speed testing, click to cancel",
       "showBasic": "Proxy basic",
       "showDetail": "Proxy detail",
-      "filter": "Filter"
+      "filter": "Filter",
+      "speedCheckPause": "Speed testing, click to pause",
+      "speedCheckResume": "Paused, click to resume (right-click to cancel)"
     },
     "placeholders": {
       "delayCheckUrl": "Delay check URL"

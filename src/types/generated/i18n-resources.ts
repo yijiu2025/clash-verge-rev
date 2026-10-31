@@ -607,6 +607,8 @@ export interface TranslationResources {
           sortName: string
           speedCheck: string
           speedCheckCancel: string
+          speedCheckPause: string
+          speedCheckResume: string
           speedCheckUrl: string
         }
       }

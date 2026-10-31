@@ -25,8 +25,9 @@ import { useVerge } from '@/hooks/use-verge'
 import { useProxiesData, useSystemData } from '@/providers/app-data-context'
 import delayManager from '@/services/delay'
 import speedManager, {
-  DEFAULT_SPEED_TEST_URL,
+  resolveSpeedTestUrl,
   SPEED_TEST_WINDOW_MS,
+  type SpeedScanAction,
 } from '@/services/speed'
 import {
   isInteractableMember,
@@ -157,18 +158,41 @@ function useProxyRenderState(
     | {
         groupName: string
         running: boolean
+        paused: boolean
         done: number
         total: number
+        /** node being measured right now */
+        current?: string
+        /** URL the measurements use, surfaced on the toolbar button */
+        url: string
       }
     | undefined
   >(undefined)
-  const speedScanRef = useRef({ running: false, cancel: false })
+  const speedScanRef = useRef({ running: false, cancel: false, paused: false })
 
   const handleCheckSpeed = useStableCallback(
-    async (groupName: string, customUrl?: string) => {
-      // 已经在跑：再点一次当作「取消」
-      if (speedScanRef.current.running) {
-        speedScanRef.current.cancel = true
+    async (groupName: string, customUrl?: string, action?: SpeedScanAction) => {
+      const scan = speedScanRef.current
+      // 控制动作：运行中可暂停/取消，暂停中可继续。
+      if (scan.running && (action === 'pause' || action === 'cancel')) {
+        if (action === 'pause') {
+          scan.paused = true
+          setSpeedScan((state) => (state ? { ...state, paused: true } : state))
+        } else {
+          scan.cancel = true
+          scan.paused = false
+        }
+        return
+      }
+      if (scan.running && action === 'resume' && scan.paused) {
+        scan.paused = false
+        setSpeedScan((state) => (state ? { ...state, paused: false } : state))
+        return
+      }
+      // 无动作的点击 = 运行中取消（旧行为），空闲则开始新一轮。
+      if (scan.running) {
+        scan.cancel = true
+        scan.paused = false
         return
       }
 
@@ -197,26 +221,37 @@ function useProxyRenderState(
       // 工具栏输入框里填了合法 http(s) 地址就优先用它（即「在这里输入测速
       // 地址，点测速」）；乱填的文本（备注、组名之类）直接忽略并回落到设置
       // 页的测速源，否则整组会秒失败在 URL 解析上。
-      const trimmedCustom = customUrl?.trim()
-      const customUrlValid = (() => {
-        if (!trimmedCustom) return false
-        try {
-          const parsed = new URL(trimmedCustom)
-          return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-        } catch {
-          return false
-        }
-      })()
-      const url =
-        (customUrlValid ? trimmedCustom : undefined) ||
-        verge?.speed_test_url ||
-        DEFAULT_SPEED_TEST_URL
-      speedScanRef.current = { running: true, cancel: false }
-      setSpeedScan({ groupName, running: true, done: 0, total: list.length })
+      const url = resolveSpeedTestUrl(
+        customUrl,
+        verge?.speed_test_url ?? undefined,
+      )
+      // 清掉上一轮的结果（尤其是失败提示），避免新旧混在一起。
+      speedManager.resetGroup(groupName)
+      speedScanRef.current = { running: true, cancel: false, paused: false }
+      setSpeedScan({
+        groupName,
+        running: true,
+        paused: false,
+        done: 0,
+        total: list.length,
+        url,
+      })
 
       try {
         for (let i = 0; i < list.length; i += 1) {
+          while (speedScanRef.current.paused && !speedScanRef.current.cancel) {
+            await new Promise((resolve) => setTimeout(resolve, 200))
+          }
           if (speedScanRef.current.cancel) break
+          setSpeedScan({
+            groupName,
+            running: true,
+            paused: speedScanRef.current.paused,
+            done: i,
+            total: list.length,
+            current: list[i].ref.name,
+            url,
+          })
           await speedManager.checkSpeed(
             list[i].ref.name,
             groupName,
@@ -226,12 +261,16 @@ function useProxyRenderState(
           setSpeedScan({
             groupName,
             running: true,
+            paused: speedScanRef.current.paused,
             done: i + 1,
             total: list.length,
+            current: list[i].ref.name,
+            url,
           })
         }
       } finally {
         speedScanRef.current.running = false
+        speedScanRef.current.paused = false
         setSpeedScan(undefined)
       }
     },

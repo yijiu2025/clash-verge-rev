@@ -35,12 +35,19 @@ interface RenderProps {
   isChainMode?: boolean
   onLocation: (group: IRenderItem['group']) => void
   onCheckAll: (groupName: string) => void
-  onCheckSpeed?: (groupName: string, testUrl?: string) => void
+  onCheckSpeed?: (
+    groupName: string,
+    testUrl?: string,
+    action?: 'pause' | 'resume' | 'cancel',
+  ) => void
   speedScan?: {
     groupName: string
     running: boolean
+    paused: boolean
     done: number
     total: number
+    current?: string
+    url: string
   }
   onHeadState: (groupName: string, patch: Partial<HeadState>) => void
   onChangeProxy: (
@@ -212,9 +219,7 @@ export const ProxyRender = memo(function ProxyRender(props: RenderProps) {
           headState={headState!}
           onLocation={() => onLocation(group)}
           onCheckDelay={() => onCheckAll(group.name)}
-          onCheckSpeed={
-            onCheckSpeed ? (u) => onCheckSpeed(group.name, u) : undefined
-          }
+          onCheckSpeed={onCheckSpeed}
           speedScan={
             speedScan && speedScan.groupName === group.name
               ? speedScan
@@ -269,9 +274,7 @@ export const ProxyRender = memo(function ProxyRender(props: RenderProps) {
         headState={headState!}
         onLocation={() => onLocation(group)}
         onCheckDelay={() => onCheckAll(group.name)}
-        onCheckSpeed={
-          onCheckSpeed ? (u) => onCheckSpeed(group.name, u) : undefined
-        }
+        onCheckSpeed={onCheckSpeed}
         speedScan={
           speedScan && speedScan.groupName === group.name
             ? speedScan

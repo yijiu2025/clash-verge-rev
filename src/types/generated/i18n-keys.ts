@@ -309,6 +309,8 @@ export const translationKeys = [
   'proxies.page.tooltips.showBasic',
   'proxies.page.tooltips.showDetail',
   'proxies.page.tooltips.filter',
+  'proxies.page.tooltips.speedCheckPause',
+  'proxies.page.tooltips.speedCheckResume',
   'proxies.page.placeholders.delayCheckUrl',
   'proxies.page.empty.noAvailableGroups',
   'proxies.page.empty.noProxies',

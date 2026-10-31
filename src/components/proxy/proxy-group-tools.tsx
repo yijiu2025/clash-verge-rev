@@ -1,6 +1,7 @@
 import AccessTimeRounded from '@mui/icons-material/AccessTimeRounded'
 import MyLocationRounded from '@mui/icons-material/MyLocationRounded'
 import NetworkCheckRounded from '@mui/icons-material/NetworkCheckRounded'
+import PlayArrowRounded from '@mui/icons-material/PlayArrowRounded'
 import SearchOffRounded from '@mui/icons-material/SearchOffRounded'
 import SearchRounded from '@mui/icons-material/SearchRounded'
 import SortByAlphaRounded from '@mui/icons-material/SortByAlphaRounded'
@@ -25,6 +26,7 @@ import { useTranslation } from 'react-i18next'
 import { useVerge } from '@/hooks/use-verge'
 import delayManager from '@/services/delay'
 import { showNotice } from '@/services/notice-service'
+import { resolveSpeedTestUrl } from '@/services/speed'
 import { isValidUrl } from '@/utils/network'
 
 import { BaseSearchBox, type SearchState } from '../base'
@@ -40,8 +42,20 @@ interface Props {
   headState: HeadState
   onLocation: () => void
   onCheckDelay: () => void
-  onCheckSpeed?: (groupName: string, testUrl?: string) => void
-  speedScan?: { running: boolean; done: number; total: number }
+  onCheckSpeed?: (
+    groupName: string,
+    testUrl?: string,
+    action?: 'pause' | 'resume' | 'cancel',
+  ) => void
+  speedScan?: {
+    groupName: string
+    running: boolean
+    paused: boolean
+    done: number
+    total: number
+    current?: string
+    url: string
+  }
   onHeadState: (val: Partial<HeadState>) => void
 }
 
@@ -202,20 +216,38 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
           size="small"
           color="inherit"
           title={
-            speedScan?.running
-              ? `${t('proxies.page.tooltips.speedCheckCancel')} ${speedScan.done}/${speedScan.total}`
-              : headState.testUrl?.trim()
-                ? t('proxies.page.tooltips.speedCheckUrl')
-                : t('proxies.page.tooltips.speedCheck')
+            speedScan?.running && !speedScan.paused
+              ? `${t('proxies.page.tooltips.speedCheckPause')} · ${speedScan.done}/${speedScan.total}${
+                  speedScan.current ? ` · ${speedScan.current}` : ''
+                } · ${speedScan.url}`
+              : speedScan?.paused
+                ? `${t('proxies.page.tooltips.speedCheckResume')} · ${speedScan.done}/${speedScan.total} · ${speedScan.url}`
+                : `${headState.testUrl?.trim() ? t('proxies.page.tooltips.speedCheckUrl') : t('proxies.page.tooltips.speedCheck')} · ${resolveSpeedTestUrl(headState.testUrl ?? undefined, verge?.speed_test_url ?? undefined)}`
           }
           onClick={(e) => {
             e.preventDefault()
             e.stopPropagation()
-            onCheckSpeed(groupName, headState.testUrl?.trim() || undefined)
+            onCheckSpeed(
+              groupName,
+              headState.testUrl?.trim() || undefined,
+              speedScan?.running && !speedScan.paused
+                ? 'pause'
+                : speedScan?.paused
+                  ? 'resume'
+                  : undefined,
+            )
+          }}
+          onContextMenu={(e) => {
+            if (!speedScan?.running) return
+            e.preventDefault()
+            e.stopPropagation()
+            onCheckSpeed(groupName, undefined, 'cancel')
           }}
         >
-          {speedScan?.running ? (
+          {speedScan?.running && !speedScan.paused ? (
             <CircularProgress size={16} color="inherit" />
+          ) : speedScan?.paused ? (
+            <PlayArrowRounded fontSize="inherit" />
           ) : (
             <SpeedRounded fontSize="inherit" />
           )}

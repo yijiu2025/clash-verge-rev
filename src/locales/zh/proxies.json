@@ -40,7 +40,9 @@
       "speedCheckCancel": "测速中，点击取消",
       "showBasic": "隐藏节点细节",
       "showDetail": "展示节点细节",
-      "filter": "过滤节点"
+      "filter": "过滤节点",
+      "speedCheckPause": "测速中，点击暂停",
+      "speedCheckResume": "已暂停，点击继续（右键取消）"
     },
     "placeholders": {
       "delayCheckUrl": "延迟测试链接"

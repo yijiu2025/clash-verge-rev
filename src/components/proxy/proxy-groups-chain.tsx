@@ -92,12 +92,19 @@ interface ProxyGroupsChainProps {
 
   // Shared callbacks
   onCheckAll: (groupName: string) => void
-  onCheckSpeed?: (groupName: string, testUrl?: string) => void
+  onCheckSpeed?: (
+    groupName: string,
+    testUrl?: string,
+    action?: 'pause' | 'resume' | 'cancel',
+  ) => void
   speedScan?: {
     groupName: string
     running: boolean
+    paused: boolean
     done: number
     total: number
+    current?: string
+    url: string
   }
   onHeadState: (groupName: string, patch: Partial<HeadState>) => void
   onLocation: (group: any) => void
@@ -256,12 +263,19 @@ function ProxyVirtualList({
   measureElement: (node: Element | null) => void
   onLocation: (group: any) => void
   onCheckAll: (groupName: string) => void
-  onCheckSpeed?: (groupName: string, testUrl?: string) => void
+  onCheckSpeed?: (
+    groupName: string,
+    testUrl?: string,
+    action?: 'pause' | 'resume' | 'cancel',
+  ) => void
   speedScan?: {
     groupName: string
     running: boolean
+    paused: boolean
     done: number
     total: number
+    current?: string
+    url: string
   }
   onHeadState: (groupName: string, patch: Partial<HeadState>) => void
   onChangeProxy: (group: ProxyGroupView, member: ResolvedProxyMember) => void

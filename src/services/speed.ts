@@ -58,6 +58,33 @@ const CACHE_TTL = 30 * 60 * 1000
 export const SPEED_TEST_WINDOW_MS = 8000
 const DEFAULT_TIMEOUT_MS = SPEED_TEST_WINDOW_MS
 
+/**
+ * Resolve the URL a measurement will actually use: a well-formed http(s)
+ * value from the group's URL box wins, otherwise the configured source,
+ * otherwise the built-in default. Anything else typed into the box (notes,
+ * group names) is ignored rather than failing the whole run.
+ */
+export function resolveSpeedTestUrl(
+  customUrl: string | undefined,
+  configured: string | undefined,
+): string {
+  const trimmed = customUrl?.trim()
+  if (trimmed) {
+    try {
+      const parsed = new URL(trimmed)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return trimmed
+      }
+    } catch {
+      // not a URL — fall through
+    }
+  }
+  return configured || DEFAULT_SPEED_TEST_URL
+}
+
+/** Control verb for a group-wide speed run besides starting it. */
+export type SpeedScanAction = 'pause' | 'resume' | 'cancel'
+
 class SpeedManager {
   private cache = new Map<string, SpeedUpdate>()
   private listeners = new Map<string, Set<(update: SpeedUpdate) => void>>()
@@ -122,6 +149,26 @@ class SpeedManager {
   getSpeed(name: string, group: string): number {
     const update = this.getSpeedUpdate(name, group)
     return update ? update.speed : -1
+  }
+
+  /**
+   * Clear every cached result of one group and mark its proxies untested —
+   * used before a group-wide run so stale failures from a previous round do
+   * not linger next to the fresh ones.
+   */
+  resetGroup(group: string) {
+    const prefix = `${group}::`
+    for (const key of [...this.cache.keys()]) {
+      if (!key.startsWith(prefix)) continue
+      this.cache.delete(key)
+      this.notify(key, {
+        speed: -1,
+        peak: 0,
+        downloaded: 0,
+        elapsed: 0,
+        updatedAt: Date.now(),
+      })
+    }
   }
 
   async checkSpeed(
