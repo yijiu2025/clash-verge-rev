@@ -70,10 +70,19 @@ export function resolveSpeedTestUrl(
 ): string {
   const trimmed = customUrl?.trim()
   if (trimmed) {
+    // A value without a scheme (e.g. "www.google.com") is assumed https.
+    const candidate = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)
+      ? trimmed
+      : `https://${trimmed}`
     try {
-      const parsed = new URL(trimmed)
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        return trimmed
+      const parsed = new URL(candidate)
+      // The dot in the hostname keeps plain notes ("亏本机场", "test")
+      // from being promoted into pseudo-domains.
+      if (
+        (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+        parsed.hostname.includes('.')
+      ) {
+        return candidate
       }
     } catch {
       // not a URL — fall through

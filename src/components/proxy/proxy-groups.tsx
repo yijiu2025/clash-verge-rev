@@ -238,36 +238,58 @@ function useProxyRenderState(
       })
 
       try {
-        for (let i = 0; i < list.length; i += 1) {
-          while (speedScanRef.current.paused && !speedScanRef.current.cancel) {
-            await new Promise((resolve) => setTimeout(resolve, 200))
+        // 并发流水线：3 条通道同时测不同节点。mihomo 的连接在建立时绑定节点，
+        // 后端在每次建连前会经全局锁串行地「选节点 → 建连」，因此多条通道
+        // 互不串线。带宽是共享的，并发测出的绝对值可能偏低，但排序不变。
+        const LANES = 3
+        const LANE_STAGGER_MS = 2000
+        let nextIndex = 0
+        let completed = 0
+
+        const runLane = async (laneId: number) => {
+          // 错峰启动，让各通道的测量窗口错开，窗口收尾更平滑。
+          await new Promise((resolve) => setTimeout(resolve, laneId * LANE_STAGGER_MS))
+          while (true) {
+            while (speedScanRef.current.paused && !speedScanRef.current.cancel) {
+              await new Promise((resolve) => setTimeout(resolve, 200))
+            }
+            if (speedScanRef.current.cancel) break
+            const index = nextIndex
+            if (index >= list.length) break
+            nextIndex += 1
+            setSpeedScan({
+              groupName,
+              running: true,
+              paused: speedScanRef.current.paused,
+              done: completed,
+              total: list.length,
+              current: list[index].ref.name,
+              url,
+            })
+            await speedManager.checkSpeed(
+              list[index].ref.name,
+              groupName,
+              url,
+              SPEED_TEST_WINDOW_MS,
+            )
+            completed += 1
+            setSpeedScan({
+              groupName,
+              running: true,
+              paused: speedScanRef.current.paused,
+              done: completed,
+              total: list.length,
+              current: list[index].ref.name,
+              url,
+            })
           }
-          if (speedScanRef.current.cancel) break
-          setSpeedScan({
-            groupName,
-            running: true,
-            paused: speedScanRef.current.paused,
-            done: i,
-            total: list.length,
-            current: list[i].ref.name,
-            url,
-          })
-          await speedManager.checkSpeed(
-            list[i].ref.name,
-            groupName,
-            url,
-            SPEED_TEST_WINDOW_MS,
-          )
-          setSpeedScan({
-            groupName,
-            running: true,
-            paused: speedScanRef.current.paused,
-            done: i + 1,
-            total: list.length,
-            current: list[i].ref.name,
-            url,
-          })
         }
+
+        await Promise.all(
+          Array.from({ length: Math.min(LANES, list.length) }, (_, lane) =>
+            runLane(lane),
+          ),
+        )
       } finally {
         speedScanRef.current.running = false
         speedScanRef.current.paused = false

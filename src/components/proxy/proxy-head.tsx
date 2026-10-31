@@ -8,8 +8,6 @@ import {
   SpeedRounded,
   VisibilityRounded,
   VisibilityOffRounded,
-  WifiTetheringRounded,
-  WifiTetheringOffRounded,
   SortByAlphaRounded,
   SortRounded,
 } from '@mui/icons-material'
@@ -195,21 +193,6 @@ export const ProxyHead = ({
       <IconButton
         size="small"
         color="inherit"
-        title={t('proxies.page.tooltips.delayCheckUrl')}
-        onClick={() =>
-          onHeadState({ textState: textState === 'url' ? null : 'url' })
-        }
-      >
-        {textState === 'url' ? (
-          <WifiTetheringRounded />
-        ) : (
-          <WifiTetheringOffRounded />
-        )}
-      </IconButton>
-
-      <IconButton
-        size="small"
-        color="inherit"
         title={
           showType
             ? t('proxies.page.tooltips.showBasic')
@@ -253,7 +236,7 @@ export const ProxyHead = ({
         </Box>
       )}
 
-      {textState === 'url' && (
+      {textState !== 'filter' && (
         <TextField
           autoComplete="new-password"
           autoFocus={autoFocus}
@@ -264,6 +247,10 @@ export const ProxyHead = ({
           variant="outlined"
           placeholder={t('proxies.page.placeholders.delayCheckUrl')}
           onChange={(e) => onHeadState({ testUrl: e.target.value })}
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+          }}
           sx={{ ml: 0.5, flex: '1 1 auto', input: { py: 0.65, px: 1 } }}
         />
       )}

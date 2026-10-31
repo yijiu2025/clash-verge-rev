@@ -9,8 +9,6 @@ import SortRounded from '@mui/icons-material/SortRounded'
 import SpeedRounded from '@mui/icons-material/SpeedRounded'
 import VisibilityOffRounded from '@mui/icons-material/VisibilityOffRounded'
 import VisibilityRounded from '@mui/icons-material/VisibilityRounded'
-import WifiTetheringOffRounded from '@mui/icons-material/WifiTetheringOffRounded'
-import WifiTetheringRounded from '@mui/icons-material/WifiTetheringRounded'
 import {
   Box,
   CircularProgress,
@@ -119,7 +117,7 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
 
   const textInput = (
     <>
-      {textState === 'filter' && (
+      {textState === 'filter' ? (
         <Box sx={{ flex: '1 1 auto' }}>
           <BaseSearchBox
             inputRef={inputRef}
@@ -134,9 +132,7 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
             onSearch={(_, state) => applyFilter(state)}
           />
         </Box>
-      )}
-
-      {textState === 'url' && (
+      ) : (
         <TextField
           inputRef={inputRef}
           autoComplete="new-password"
@@ -197,10 +193,6 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
           if (!headState.open)
             // eslint-disable-next-line @eslint-react/dom-no-flush-sync
             flushSync(() => onHeadState({ open: true }))
-          // Remind the user that it is custom test url
-          if (testUrl?.trim() && textState !== 'filter') {
-            onHeadState({ textState: 'url' })
-          }
           if (testUrl?.trim() && !isValidUrl(testUrl)) {
             showNotice.warning('proxies.feedback.warnings.invalidTestUrl')
             return
@@ -278,26 +270,6 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
         {sortType !== 1 && sortType !== 2 && <SortRounded fontSize="inherit" />}
         {sortType === 1 && <AccessTimeRounded fontSize="inherit" />}
         {sortType === 2 && <SortByAlphaRounded fontSize="inherit" />}
-      </IconButton>
-
-      <IconButton
-        size="small"
-        color="inherit"
-        title={t('proxies.page.tooltips.delayCheckUrl')}
-        onClick={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          onHeadState({
-            textState: textState === 'url' ? null : 'url',
-          })
-          setTimeout(() => inputRef.current?.focus())
-        }}
-      >
-        {textState === 'url' ? (
-          <WifiTetheringRounded fontSize="inherit" />
-        ) : (
-          <WifiTetheringOffRounded fontSize="inherit" />
-        )}
       </IconButton>
 
       <IconButton

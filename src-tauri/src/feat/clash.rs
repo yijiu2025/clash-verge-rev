@@ -230,7 +230,11 @@ pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64
     };
 
     // Optionally route through a specific node by selecting it in its group.
+    // The same (group, node) pair is handed to every measurement connection
+    // below via the global select lock, which is what makes concurrent test
+    // commands safe: each command's connections always bind to its own node.
     let mut restore: Option<(std::string::String, std::string::String)> = None;
+    let mut selector: Option<LaneSelector> = None;
     if let Some(name) = &proxy_name
         && let Some(proxies) = fetch_proxies_for_speed().await
     {
@@ -252,6 +256,10 @@ pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64
                 let _ = select_node_for_speed(group_name, name).await;
                 restore = Some((group_name.clone(), now.clone()));
             }
+            selector = Some(LaneSelector {
+                group_name: group_name.to_string(),
+                node_name: name.to_string(),
+            });
             break;
         }
     }
@@ -275,22 +283,49 @@ pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64
     // If the target is an HTML page instead of a raw file, gather the page's
     // resource links and download those instead — several parallel streams
     // pulling the site's assets give a rough throughput figure where a single
-    // HTML shell would measure nothing. A hard 5 s probe budget: if the page
-    // cannot be fetched quickly, fall through and let the normal run produce
-    // the real error.
+    // HTML shell would measure nothing.
+    // The probe result is cached per URL: resource lists are a property of
+    // the page, not the node, so concurrent group-scan lanes reuse one probe
+    // instead of re-fetching the page for every node.
     let mut targets: Vec<SpeedTarget> = vec![target.clone()];
-    let mut page_probe = tokio::time::timeout(Duration::from_secs(5), Box::pin(fetch_url_bytes(&target))).await;
-    if let Ok(Ok(body)) = &mut page_probe
-        && looks_like_html(body)
-    {
-        let resources = extract_resource_urls(&std::string::String::from_utf8_lossy(body), &url);
-        let resource_targets: Vec<SpeedTarget> = resources
-            .iter()
-            .filter_map(|resource| build_target(resource, proxy_port))
-            .collect();
-        if !resource_targets.is_empty() {
-            targets.extend(resource_targets);
+    let mut page_mode = false;
+    let cache_key = format!("{url}|{proxy_port:?}");
+    let cached = PAGE_PROBE_CACHE
+        .lock()
+        .await
+        .get(&cache_key)
+        .cloned();
+    if let Some((cached_targets, cached_page_mode)) = cached {
+        targets = cached_targets;
+        page_mode = cached_page_mode;
+    } else {
+        // 10 s probe budget: multi-hop redirect chains (google.com fans out
+        // through two 302 hops to google.com.hk) need a full TCP+TLS connect
+        // per hop, which eats seconds on slower nodes. If the probe still
+        // fails, the measurement itself degrades gracefully instead of
+        // erroring.
+        let probe = tokio::time::timeout(Duration::from_secs(10), Box::pin(fetch_url_bytes(&target))).await;
+        if let Ok(Ok(body)) = &probe
+            && looks_like_html(body)
+        {
+            page_mode = true;
+            let resources =
+                extract_resource_urls(&std::string::String::from_utf8_lossy(body), &url);
+            let resource_targets: Vec<SpeedTarget> = resources
+                .iter()
+                .filter_map(|resource| build_target(resource, proxy_port))
+                .collect();
+            if !resource_targets.is_empty() {
+                // Drop the page shell itself: it is the HTML the "not a
+                // downloadable file" guard would reject on every loop.
+                targets = resource_targets;
+            }
         }
+        let mut cache = PAGE_PROBE_CACHE.lock().await;
+        if cache.len() > 8 {
+            cache.clear();
+        }
+        cache.insert(cache_key, (targets.clone(), page_mode));
     }
 
     let measured = tokio::time::timeout(overall, async move {
@@ -312,7 +347,15 @@ pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64
             let total = Arc::clone(&total);
             let stop = Arc::clone(&stop);
             let failure = Arc::clone(&failure);
-            workers.push(tokio::spawn(download_worker(targets, queue, total, stop, failure)));
+            workers.push(tokio::spawn(download_worker(
+                targets,
+                queue,
+                total,
+                stop,
+                failure,
+                page_mode,
+                selector.clone(),
+            )));
         }
 
         let mut peak: u64 = 0;
@@ -412,6 +455,54 @@ fn build_target(url: &str, proxy_port: Option<u16>) -> Option<SpeedTarget> {
     })
 }
 
+/// Browser-like User-Agent: many sites (notably Cloudflare-fronted pages)
+/// answer bare HTTP clients with 403 or a challenge page, which used to make
+/// page-mode speed tests fail immediately.
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/// Timeouts guarding the handshake phases of a speed-test request, so a hung
+/// resource cannot stall a worker for the whole run. Body transfer stays
+/// unbounded — that is the phase actually being measured.
+const SPEED_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SPEED_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const SPEED_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Build a GET request whose headers mimic a real browser visit.
+fn browser_get(path: &str, host: &str, accept: &str) -> std::string::String {
+    format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         User-Agent: {BROWSER_UA}\r\n\
+         Accept: {accept}\r\n\
+         Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n\
+         Connection: close\r\n\
+         Accept-Encoding: identity\r\n\
+         \r\n"
+    )
+}
+
+/// Select-then-connect mutual exclusion for parallel speed tests. A mihomo
+/// connection is bound to whatever node its group has selected at establish
+/// time, so every measurement connection must be opened while its own node is
+/// selected. The global lock serializes "select node → establish connection"
+/// across all concurrent test commands, letting several lanes run at once
+/// without cross-contaminating each other's routes.
+static SPEED_SELECT_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// The selector group + node a measurement connection must be bound to.
+#[derive(Clone)]
+struct LaneSelector {
+    group_name: std::string::String,
+    node_name: std::string::String,
+}
+
+/// Cache of the page-mode probe result, keyed by "url|proxy_port". Resource
+/// lists are a property of the URL, not the node, so concurrent lanes reuse
+/// one probe instead of re-fetching the page per node.
+static PAGE_PROBE_CACHE: LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<std::string::String, (Vec<SpeedTarget>, bool)>>,
+> = LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Crude but dependency-free HTML sniffing over the first bytes of a body.
 fn looks_like_html(body: &[u8]) -> bool {
     let head: Vec<u8> = body.iter().take(512).copied().collect();
@@ -457,6 +548,17 @@ fn extract_resource_urls(html: &str, base: &str) -> Vec<std::string::String> {
             }
         }
     }
+    // Same-origin assets first: they measure the site the user actually
+    // entered. Third-party CDNs, trackers and social widgets are often slow,
+    // geo-blocked or plain 404, and would burn the failure budget on noise.
+    // Stable sort keeps the document order within each group.
+    let page_host = base.host_str().unwrap_or_default().to_string();
+    urls.sort_by_key(|candidate| {
+        !tauri::Url::parse(candidate)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(|host| host == page_host))
+            .unwrap_or(false)
+    });
     urls
 }
 
@@ -469,14 +571,63 @@ fn find_attribute(text: &str, attribute: &str) -> Option<(usize, usize)> {
     Some((position, position + needle.len()))
 }
 
-/// Fetch a complete body (up to 2 MiB) with one request, for the HTML probe.
-async fn fetch_url_bytes(target: &SpeedTarget) -> anyhow::Result<Vec<u8>> {
+/// Unified body stream so redirect handling treats plain and TLS connections
+/// alike once the request has been sent (only reads happen afterwards).
+enum SpeedStream {
+    Plain(tokio::net::TcpStream),
+    Tls(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+}
+
+impl tokio::io::AsyncRead for SpeedStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            SpeedStream::Plain(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            SpeedStream::Tls(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+/// Parsed response head of one speed-test request.
+struct ResponseHead {
+    status: u16,
+    location: Option<std::string::String>,
+    body_prefix: Vec<u8>,
+}
+
+/// Establish the connection (through the mixed-port proxy when set), send a
+/// browser-like GET and read the response head. Shared by the HTML probe and
+/// the measurement workers; redirect loops live in the callers.
+async fn request_head(target: &SpeedTarget, accept: &str) -> anyhow::Result<(SpeedStream, ResponseHead)> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpStream;
 
     let mut stream = match target.proxy_port {
-        Some(proxy_port) => TcpStream::connect(format!("127.0.0.1:{proxy_port}")).await?,
-        None => TcpStream::connect(format!("{}:{}", target.host, target.port)).await?,
+        Some(proxy_port) => {
+            tokio::time::timeout(
+                SPEED_CONNECT_TIMEOUT,
+                TcpStream::connect(format!("127.0.0.1:{proxy_port}")),
+            )
+            .await??
+        }
+        None => {
+            tokio::time::timeout(
+                SPEED_CONNECT_TIMEOUT,
+                TcpStream::connect(format!("{}:{}", target.host, target.port)),
+            )
+            .await??
+        }
+    };
+
+    // A plain request through the proxy needs the absolute-form target; in
+    // every other case the origin-form path is correct.
+    let request_path: std::string::String = if !target.is_https && target.proxy_port.is_some() {
+        target.url.to_string()
+    } else {
+        target.path_and_query.clone()
     };
 
     if target.is_https {
@@ -491,18 +642,22 @@ async fn fetch_url_bytes(target: &SpeedTarget) -> anyhow::Result<Vec<u8>> {
                 )
                 .await?;
             let mut head = BytesMut::with_capacity(512);
-            loop {
-                let n = stream.read_buf(&mut head).await?;
-                if n == 0 {
-                    anyhow::bail!("proxy closed the connection during CONNECT");
+            tokio::time::timeout(SPEED_HEADER_TIMEOUT, async {
+                loop {
+                    let n = stream.read_buf(&mut head).await?;
+                    if n == 0 {
+                        anyhow::bail!("proxy closed the connection during CONNECT");
+                    }
+                    if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                    if head.len() > 8192 {
+                        anyhow::bail!("proxy CONNECT response too large");
+                    }
                 }
-                if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-                if head.len() > 8192 {
-                    anyhow::bail!("proxy CONNECT response too large");
-                }
-            }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await??;
             if !head.starts_with(b"HTTP/1.1 200") && !head.starts_with(b"HTTP/1.0 200") {
                 anyhow::bail!("proxy CONNECT rejected");
             }
@@ -511,41 +666,111 @@ async fn fetch_url_bytes(target: &SpeedTarget) -> anyhow::Result<Vec<u8>> {
         let server_name = rustls::pki_types::ServerName::try_from(target.host.as_str())
             .map_err(|_| anyhow::anyhow!("Invalid DNS name: {}", target.host))?
             .to_owned();
-        let mut tls = connector.connect(server_name, stream).await?;
-        tls.write_all(
-            format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
-                target.path_and_query, target.host
-            )
-            .as_bytes(),
-        )
-        .await?;
-        ensure_success(&mut tls, true).await?;
-        let mut body = Vec::with_capacity(64 * 1024);
-        let mut chunk = [0u8; 64 * 1024];
+        let mut tls =
+            tokio::time::timeout(SPEED_TLS_TIMEOUT, connector.connect(server_name, stream)).await??;
+        tls.write_all(browser_get(&request_path, &target.host, accept).as_bytes())
+            .await?;
+        let head = read_response_head(&mut tls).await?;
+        Ok((SpeedStream::Tls(tls), head))
+    } else {
+        stream
+            .write_all(browser_get(&request_path, &target.host, accept).as_bytes())
+            .await?;
+        let head = read_response_head(&mut stream).await?;
+        Ok((SpeedStream::Plain(stream), head))
+    }
+}
+
+/// Read the status line and headers of a response, bounded by a timeout so a
+/// silent server cannot pin a worker. Returns the parsed head plus whatever
+/// body bytes were already buffered after the header block.
+async fn read_response_head<S>(stream: &mut S) -> anyhow::Result<ResponseHead>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+
+    let mut head = BytesMut::with_capacity(2048);
+    tokio::time::timeout(SPEED_HEADER_TIMEOUT, async {
         loop {
-            let n = tls.read(&mut chunk).await?;
-            if n == 0 || body.len() >= 2 * 1024 * 1024 {
+            let n = stream.read_buf(&mut head).await?;
+            if n == 0 {
+                anyhow::bail!("测速地址未返回响应就关闭了连接");
+            }
+            if head.windows(4).any(|window| window == b"\r\n\r\n") {
                 break;
             }
-            body.extend_from_slice(&chunk[..n]);
+            if head.len() > 16 * 1024 {
+                anyhow::bail!("测速地址响应头过大");
+            }
         }
-        Ok(body)
-    } else {
-        let request = if target.proxy_port.is_some() {
-            format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
-                target.url, target.host
-            )
-        } else {
-            format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
-                target.path_and_query, target.host
-            )
-        };
-        stream.write_all(request.as_bytes()).await?;
-        ensure_success(&mut stream, true).await?;
-        let mut body = Vec::with_capacity(64 * 1024);
+        Ok::<(), anyhow::Error>(())
+    })
+    .await??;
+
+    // Split off everything after the blank line: the body prefix stays here
+    // while the upper part is parsed as the status line plus headers.
+    let (header_part, body_prefix) = match head
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+    {
+        Some(split) => {
+            let rest = head.split_off(split);
+            (head.to_vec(), rest.to_vec())
+        }
+        None => (head.to_vec(), Vec::new()),
+    };
+
+    let header_text = std::string::String::from_utf8_lossy(&header_part).to_ascii_lowercase();
+    let status = header_text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| anyhow::anyhow!("无法解析测速地址的响应状态"))?;
+    let location = header_text
+        .lines()
+        .skip(1)
+        .find_map(|line| line.strip_prefix("location:"))
+        .map(|value| value.trim().to_string());
+
+    Ok(ResponseHead {
+        status,
+        location,
+        body_prefix,
+    })
+}
+
+/// Resolve one redirect hop against the current target's URL.
+fn redirect_target(current: &SpeedTarget, location: &str) -> anyhow::Result<SpeedTarget> {
+    let base = tauri::Url::parse(&current.url)?;
+    let next = base.join(location)?;
+    build_target(next.as_str(), current.proxy_port)
+        .ok_or_else(|| anyhow::anyhow!("重定向地址无效: {next}"))
+}
+
+/// Fetch a complete body (up to 2 MiB), following redirects, for the HTML probe.
+async fn fetch_url_bytes(target: &SpeedTarget) -> anyhow::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut current = target.clone();
+    for _ in 0..5 {
+        let (mut stream, head) = request_head(
+            &current,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        )
+        .await?;
+        if (300..400).contains(&head.status)
+            && let Some(location) = head.location.filter(|value| !value.is_empty())
+        {
+            current = redirect_target(&current, &location)?;
+            continue;
+        }
+        if !(200..300).contains(&head.status) {
+            anyhow::bail!("测速地址返回 HTTP {}，请在设置中更换测速地址", head.status);
+        }
+        let mut body = head.body_prefix;
         let mut chunk = [0u8; 64 * 1024];
         loop {
             let n = stream.read(&mut chunk).await?;
@@ -554,8 +779,9 @@ async fn fetch_url_bytes(target: &SpeedTarget) -> anyhow::Result<Vec<u8>> {
             }
             body.extend_from_slice(&chunk[..n]);
         }
-        Ok(body)
+        return Ok(body);
     }
+    anyhow::bail!("测速地址重定向次数过多（>5），请直接填写最终地址")
 }
 
 /// One parallel stream. Pulls the next URL from a shared queue and
@@ -569,9 +795,15 @@ async fn download_worker(
     total: Arc<std::sync::atomic::AtomicU64>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     failure: Arc<std::sync::Mutex<Option<std::string::String>>>,
+    page_mode: bool,
+    selector: Option<LaneSelector>,
 ) {
     use std::sync::atomic::Ordering;
 
+    // Page mode (several targets) tolerates more flaky resources — ad domains,
+    // dead links and geo-blocked CDNs are normal noise when fetching a real
+    // website. A single-file target keeps the tighter budget.
+    let retire_after: u32 = if page_mode { 6 } else { 3 };
     let mut consecutive_failures: u32 = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -590,7 +822,7 @@ async fn download_worker(
             pending.pop_front()
         };
         let Some(index) = index else { break };
-        match stream_once(&targets[index], &total, &stop).await {
+        match stream_once(&targets[index], &total, &stop, selector.as_ref()).await {
             Ok(()) => consecutive_failures = 0,
             Err(error) => {
                 if let Ok(mut slot) = failure.lock()
@@ -599,9 +831,9 @@ async fn download_worker(
                     *slot = Some(format!("{error:#}"));
                 }
                 consecutive_failures += 1;
-                // Tolerate flaky resources (404s, dead CDNs); three in a row
+                // Tolerate flaky resources (404s, dead CDNs); several in a row
                 // means this worker's route is broken, so stop it.
-                if consecutive_failures >= 3 {
+                if consecutive_failures >= retire_after {
                     break;
                 }
             }
@@ -609,145 +841,50 @@ async fn download_worker(
     }
 }
 
-/// A single request/response cycle: connect, request, verify the status line,
-/// then drain the body.
+/// A single request/response cycle: connect, request, follow up to 5
+/// redirects, then drain the body into the byte counter. An HTML body is
+/// acceptable — page selection already happened at the probe stage, and when
+/// that probe timed out, measuring the page itself beats erroring out.
+///
+/// When `selector` is set (parallel group scans), every connection — including
+/// each redirect hop — is opened while holding the global select lock so the
+/// connection binds to this lane's node and not to whichever node another
+/// concurrent lane selected last.
 async fn stream_once(
     target: &SpeedTarget,
     total: &std::sync::atomic::AtomicU64,
     stop: &std::sync::atomic::AtomicBool,
+    selector: Option<&LaneSelector>,
 ) -> anyhow::Result<()> {
     use std::sync::atomic::Ordering;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::net::TcpStream;
+    use std::time::Duration;
 
-    let SpeedTarget {
-        host,
-        port,
-        is_https,
-        path_and_query,
-        url,
-        proxy_port,
-    } = target;
-
-    let mut stream = match proxy_port {
-        Some(pp) => TcpStream::connect(format!("127.0.0.1:{pp}")).await?,
-        None => TcpStream::connect(format!("{host}:{port}")).await?,
-    };
-
-    if *is_https {
-        if proxy_port.is_some() {
-            stream
-                .write_all(format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n").as_bytes())
-                .await?;
-            let mut head = BytesMut::with_capacity(512);
-            loop {
-                let n = stream.read_buf(&mut head).await?;
-                if n == 0 {
-                    anyhow::bail!("proxy closed the connection during CONNECT");
-                }
-                if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-                if head.len() > 8192 {
-                    anyhow::bail!("proxy CONNECT response too large");
-                }
-            }
-            if !head.starts_with(b"HTTP/1.1 200") && !head.starts_with(b"HTTP/1.0 200") {
-                anyhow::bail!("proxy CONNECT rejected");
-            }
-        }
-        let connector = tokio_rustls::TlsConnector::from(Arc::clone(&TLS_CONFIG));
-        let server_name = rustls::pki_types::ServerName::try_from(host.as_str())
-            .map_err(|_| anyhow::anyhow!("Invalid DNS name: {host}"))?
-            .to_owned();
-        let mut tls = connector.connect(server_name, stream).await?;
-        tls.write_all(
-            format!(
-                "GET {path_and_query} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n"
-            )
-            .as_bytes(),
-        )
-        .await?;
-        let leftover = ensure_success(&mut tls, false).await?;
-        if !leftover.is_empty() {
-            total.fetch_add(leftover.len() as u64, Ordering::Relaxed);
-        }
-        pump_bytes(&mut tls, total, stop).await
-    } else {
-        let request = if proxy_port.is_some() {
-            format!("GET {url} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n")
+    let mut current = target.clone();
+    for _ in 0..5 {
+        let (mut stream, head) = if let Some(sel) = selector {
+            let _guard = SPEED_SELECT_LOCK.lock().await;
+            select_node_for_speed(&sel.group_name, &sel.node_name).await;
+            // Give mihomo a beat to apply the new selection before dialing.
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            request_head(&current, "*/*").await?
         } else {
-            format!(
-                "GET {path_and_query} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n"
-            )
+            request_head(&current, "*/*").await?
         };
-        stream.write_all(request.as_bytes()).await?;
-        let leftover = ensure_success(&mut stream, false).await?;
-        if !leftover.is_empty() {
-            total.fetch_add(leftover.len() as u64, Ordering::Relaxed);
+        if (300..400).contains(&head.status)
+            && let Some(location) = head.location.filter(|value| !value.is_empty())
+        {
+            current = redirect_target(&current, &location)?;
+            continue;
         }
-        pump_bytes(&mut stream, total, stop).await
+        if !(200..300).contains(&head.status) {
+            anyhow::bail!("测速地址返回 HTTP {}，请在设置中更换测速地址", head.status);
+        }
+        if !head.body_prefix.is_empty() {
+            total.fetch_add(head.body_prefix.len() as u64, Ordering::Relaxed);
+        }
+        return pump_bytes(&mut stream, total, stop).await;
     }
-}
-
-/// Read the status line and response headers; reject non-2xx responses and
-/// HTML pages, so a refused request (e.g. Cloudflare rejecting an oversized
-/// `bytes=` value) or a pasted website URL surfaces as a clear error instead
-/// of a silent 0 B/s. Returns the body bytes already buffered after the
-/// header block.
-async fn ensure_success<S>(stream: &mut S, allow_html: bool) -> anyhow::Result<Vec<u8>>
-where
-    S: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt as _;
-
-    let mut head = BytesMut::with_capacity(2048);
-    loop {
-        let n = stream.read_buf(&mut head).await?;
-        if n == 0 {
-            anyhow::bail!("测速地址未返回响应就关闭了连接");
-        }
-        if head.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-        if head.len() > 16 * 1024 {
-            anyhow::bail!("测速地址响应头过大");
-        }
-    }
-
-    // Split off everything after the blank line: the body prefix stays here
-    // while the upper part is parsed as the status line plus headers.
-    let (header_part, body_prefix) = match head
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)
-    {
-        Some(split) => {
-            let rest = head.split_off(split);
-            (head.to_vec(), rest.to_vec())
-        }
-        None => (head.to_vec(), Vec::new()),
-    };
-
-    let first_line = header_part.split(|byte| *byte == b'\n').next().unwrap_or(&[]);
-    let status = std::str::from_utf8(first_line)
-        .ok()
-        .and_then(|text| text.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok());
-    match status {
-        Some(code) if (200..300).contains(&code) => {}
-        Some(code) => anyhow::bail!("测速地址返回 HTTP {code}，请在设置中更换测速地址"),
-        None => anyhow::bail!("无法解析测速地址的响应状态"),
-    }
-
-    let header_text = std::string::String::from_utf8_lossy(&header_part).to_ascii_lowercase();
-    if !allow_html && header_text.contains("text/html") {
-        anyhow::bail!(
-            "该地址返回的是网页而不是可下载的文件，请填写文件直链（如 https://proof.ovh.net/files/100Mb.dat）"
-        );
-    }
-
-    Ok(body_prefix)
+    anyhow::bail!("测速地址重定向次数过多（>5），请直接填写最终地址")
 }
 
 /// Drain the response body, accumulating the byte count until stopped.
