@@ -1,5 +1,5 @@
 {
-  "version": "2.5.9",
+  "version": "2.5.10",
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "bundle": {
     "active": true,
@@ -24,7 +24,7 @@
     "beforeBuildCommand": "pnpm run web:build",
     "frontendDist": "../dist",
     "beforeDevCommand": "pnpm run web:dev",
-    "devUrl": "http://localhost:3000/",
+    "devUrl": "http://127.0.0.1:3000/",
     "removeUnusedCommands": true
   },
   "productName": "Clash Verge",
