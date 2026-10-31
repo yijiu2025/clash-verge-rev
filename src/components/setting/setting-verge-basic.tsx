@@ -233,16 +233,10 @@ const SettingVergeBasic = ({ onError }: Props) => {
           value={speed_test_url || DEFAULT_SPEED_TEST_URL}
           onCatch={onError}
           onFormat={(e: any) => e.target.value}
-          onChange={(e) =>
-            onChangeData({
-              speed_test_url: e && e !== DEFAULT_SPEED_TEST_URL ? e : null,
-            })
-          }
-          onGuard={(e) =>
-            patchVerge({
-              speed_test_url: e && e !== DEFAULT_SPEED_TEST_URL ? e : null,
-            })
-          }
+          // 这里必须存真实 URL：patch 对 `None` 是「不修改」语义，写成 null
+          // 会让下拉框选完又弹回原值。
+          onChange={(e) => onChangeData({ speed_test_url: e })}
+          onGuard={(e) => patchVerge({ speed_test_url: e })}
         >
           <Select size="small" sx={{ width: 240, '> div': { py: '7.5px' } }}>
             {speedSources.map((source) => (
