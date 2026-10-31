@@ -194,10 +194,23 @@ function useProxyRenderState(
       const list = alive.length > 0 ? alive : members
       if (list.length === 0) return
 
-      // 工具栏输入框里填了地址就优先用它（即「在这里输入测速地址，点测速」）；
-      // 否则回落到设置页的测速源，最后是内置默认。
+      // 工具栏输入框里填了合法 http(s) 地址就优先用它（即「在这里输入测速
+      // 地址，点测速」）；乱填的文本（备注、组名之类）直接忽略并回落到设置
+      // 页的测速源，否则整组会秒失败在 URL 解析上。
+      const trimmedCustom = customUrl?.trim()
+      const customUrlValid = (() => {
+        if (!trimmedCustom) return false
+        try {
+          const parsed = new URL(trimmedCustom)
+          return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+        } catch {
+          return false
+        }
+      })()
       const url =
-        customUrl?.trim() || verge?.speed_test_url || DEFAULT_SPEED_TEST_URL
+        (customUrlValid ? trimmedCustom : undefined) ||
+        verge?.speed_test_url ||
+        DEFAULT_SPEED_TEST_URL
       speedScanRef.current = { running: true, cancel: false }
       setSpeedScan({ groupName, running: true, done: 0, total: list.length })
 
