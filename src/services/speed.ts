@@ -5,32 +5,31 @@ import { debugLog } from '@/utils/debug'
 /**
  * Default download endpoint used for the throughput measurement.
  *
- * Only Cloudflare exposes a raw byte-stream endpoint that works with a plain
- * `GET` (the other common speed-test sites — speedtest.net, fast.com, Google
- * Fiber — are HTML/JS pages and cannot be measured by a direct download).
- * Users can override this in Verge settings via `speed_test_url`.
+ * A source has to be a raw byte stream served by a plain `GET` (the usual
+ * speed-test websites — speedtest.net, fast.com, Google Fiber — are HTML/JS
+ * pages and cannot be measured by a direct download). Users can override this
+ * in Verge settings via `speed_test_url`.
  *
- * 50 MiB, not 100 MiB: the endpoint rejects requests above a certain size with
- * HTTP 403, which used to make every measurement come back as 0 B/s.
+ * OVH wins the default over Cloudflare: its file endpoint has been reachable
+ * on every line we tested, while `speed.cloudflare.com/__down` is flaky — it
+ * 403s large `bytes` values and at times the TLS handshake to it fails outright
+ * on otherwise healthy proxies.
  */
-export const DEFAULT_SPEED_TEST_URL =
-  'https://speed.cloudflare.com/__down?bytes=52428800'
+export const DEFAULT_SPEED_TEST_URL = 'https://proof.ovh.net/files/100Mb.dat'
 
 /**
  * Selectable download sources.
- *
- * A source has to be a raw byte stream served by a plain `GET`. The usual
- * speed-test websites (speedtest.net, fast.com, fiber.google.com) only ship
- * HTML/JS pages whose real transfer happens against an API that needs a
- * session handshake, so they cannot be used as a download target here.
  */
 export const SPEED_TEST_SOURCES: { label: string; url: string }[] = [
-  { label: 'Cloudflare (50 MB)', url: DEFAULT_SPEED_TEST_URL },
+  { label: 'OVH (100 MB)', url: 'https://proof.ovh.net/files/100Mb.dat' },
+  {
+    label: 'Cloudflare (50 MB)',
+    url: 'https://speed.cloudflare.com/__down?bytes=52428800',
+  },
   {
     label: 'CacheFly (100 MB)',
     url: 'https://cachefly.cachefly.net/100mb.test',
   },
-  { label: 'OVH (100 MB)', url: 'https://proof.ovh.net/files/100Mb.dat' },
   {
     label: 'TUNA Mirror (100 MB)',
     url: 'https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-live-server-amd64.iso',
