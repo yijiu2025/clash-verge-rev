@@ -132,7 +132,7 @@ pub async fn test_speed(
     proxy_name: Option<std::string::String>,
     timeout_ms: u64,
 ) -> CmdResult<feat::SpeedTestResult> {
-    feat::test_speed(url.into(), proxy_name.map(|p| p.into()), timeout_ms)
+    Box::pin(feat::test_speed(url.into(), proxy_name.map(|p| p.into()), timeout_ms))
         .await
         .map_err(|error| proxy_aware_coded_error(&error, "SPEED_TEST_FAILED"))
 }

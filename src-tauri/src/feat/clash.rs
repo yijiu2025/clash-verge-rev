@@ -221,20 +221,6 @@ pub struct SpeedTestResult {
 pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64) -> anyhow::Result<SpeedTestResult> {
     use std::time::{Duration, Instant};
 
-    let parsed = tauri::Url::parse(&url)?;
-    let is_https = parsed.scheme() == "https";
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid URL: no host"))?
-        .to_string();
-    let port = parsed.port().unwrap_or(if is_https { 443 } else { 80 });
-    let path = parsed.path();
-    let query = parsed.query();
-    let path_and_query = match query {
-        Some(q) if !q.is_empty() => format!("{path}?{q}"),
-        _ => path.to_string(),
-    };
-
     let verge = Config::verge().await.latest_arc();
     let proxy_enabled = verge.enable_system_proxy.unwrap_or(false) || verge.enable_tun_mode.unwrap_or(false);
     let proxy_port = if proxy_enabled {
@@ -271,7 +257,8 @@ pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64
     }
 
     let budget = Duration::from_millis(timeout_ms.clamp(2000, 30_000));
-    let overall = budget + Duration::from_secs(6);
+    // +5 s for the HTML page probe, +6 s of graceful drain after the window.
+    let overall = budget + Duration::from_secs(11);
 
     // A single TCP stream is bounded by the bandwidth-delay product, so it
     // under-reports fast links with high latency. Real speed tests fan out
@@ -283,14 +270,28 @@ pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64
     const SAMPLE_MS: u64 = 200;
     const WARMUP_MS: u64 = 2000;
 
-    let target = SpeedTarget {
-        host: host.clone(),
-        port,
-        is_https,
-        path_and_query: path_and_query.clone(),
-        url: url.clone(),
-        proxy_port,
-    };
+    let target = build_target(&url, proxy_port).ok_or_else(|| anyhow::anyhow!("Invalid URL: {url}"))?;
+
+    // If the target is an HTML page instead of a raw file, gather the page's
+    // resource links and download those instead — several parallel streams
+    // pulling the site's assets give a rough throughput figure where a single
+    // HTML shell would measure nothing. A hard 5 s probe budget: if the page
+    // cannot be fetched quickly, fall through and let the normal run produce
+    // the real error.
+    let mut targets: Vec<SpeedTarget> = vec![target.clone()];
+    let mut page_probe = tokio::time::timeout(Duration::from_secs(5), Box::pin(fetch_url_bytes(&target))).await;
+    if let Ok(Ok(body)) = &mut page_probe
+        && looks_like_html(body)
+    {
+        let resources = extract_resource_urls(&std::string::String::from_utf8_lossy(body), &url);
+        let resource_targets: Vec<SpeedTarget> = resources
+            .iter()
+            .filter_map(|resource| build_target(resource, proxy_port))
+            .collect();
+        if !resource_targets.is_empty() {
+            targets.extend(resource_targets);
+        }
+    }
 
     let measured = tokio::time::timeout(overall, async move {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -301,19 +302,17 @@ pub async fn test_speed(url: String, proxy_name: Option<String>, timeout_ms: u64
 
         let mut workers = Vec::with_capacity(CONNECTIONS as usize);
         let failure: Arc<std::sync::Mutex<Option<std::string::String>>> = Arc::new(std::sync::Mutex::new(None));
+        let targets = Arc::new(targets);
+        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from_iter(
+            0..targets.len(),
+        )));
         for _ in 0..CONNECTIONS {
-            let target = target.clone();
+            let targets = Arc::clone(&targets);
+            let queue = Arc::clone(&queue);
             let total = Arc::clone(&total);
             let stop = Arc::clone(&stop);
             let failure = Arc::clone(&failure);
-            workers.push(tokio::spawn(async move {
-                if let Err(error) = download_worker(target, total, stop).await
-                    && let Ok(mut slot) = failure.lock()
-                    && slot.is_none()
-                {
-                    *slot = Some(format!("{error:#}"));
-                }
-            }));
+            workers.push(tokio::spawn(download_worker(targets, queue, total, stop, failure)));
         }
 
         let mut peak: u64 = 0;
@@ -389,24 +388,225 @@ struct SpeedTarget {
     proxy_port: Option<u16>,
 }
 
-/// One parallel stream. Re-requests the payload whenever a response ends, so
-/// the sampler keeps receiving data for the whole window even on fast links.
+fn build_target(url: &str, proxy_port: Option<u16>) -> Option<SpeedTarget> {
+    let parsed = tauri::Url::parse(url).ok()?;
+    let is_https = parsed.scheme() == "https" || parsed.scheme() == "http";
+    if !is_https {
+        return None;
+    }
+    let is_https = parsed.scheme() == "https";
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port().unwrap_or(if is_https { 443 } else { 80 });
+    let path = parsed.path();
+    let path_and_query = match parsed.query() {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path.to_string(),
+    };
+    Some(SpeedTarget {
+        host,
+        port,
+        is_https,
+        path_and_query,
+        url: url.into(),
+        proxy_port,
+    })
+}
+
+/// Crude but dependency-free HTML sniffing over the first bytes of a body.
+fn looks_like_html(body: &[u8]) -> bool {
+    let head: Vec<u8> = body.iter().take(512).copied().collect();
+    let text = std::string::String::from_utf8_lossy(&head).to_ascii_lowercase();
+    text.contains("<!doctype html") || text.contains("<html")
+}
+
+/// Pull every `src="…"` / `href="…"` reference out of an HTML page and
+/// resolve it against the page URL. Skips inline data, fragments and
+/// non-http schemes; capped so a huge page cannot stall the probe.
+fn extract_resource_urls(html: &str, base: &str) -> Vec<std::string::String> {
+    let base = match tauri::Url::parse(base) {
+        Ok(base) => base,
+        Err(_) => return Vec::new(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut urls = Vec::new();
+    for attribute in ["src", "href"] {
+        let mut rest = html;
+        while urls.len() < 48 {
+            let Some(attr_pos) = find_attribute(rest, attribute) else {
+                break;
+            };
+            rest = &rest[attr_pos.1..];
+            let Some(end) = rest.find('"') else { break };
+            let value = &rest[..end];
+            rest = &rest[end + 1..];
+            if value.is_empty()
+                || value.len() > 500
+                || value.starts_with('#')
+                || value.starts_with("data:")
+                || value.starts_with("javascript:")
+                || value.starts_with("mailto:")
+            {
+                continue;
+            }
+            let resolved = match base.join(value) {
+                Ok(resolved) if resolved.scheme() == "http" || resolved.scheme() == "https" => resolved.to_string(),
+                _ => continue,
+            };
+            if seen.insert(resolved.clone()) {
+                urls.push(resolved);
+            }
+        }
+    }
+    urls
+}
+
+/// Locate `attribute="` (case-insensitive) and return (value_start, end)
+/// offsets into `text`.
+fn find_attribute(text: &str, attribute: &str) -> Option<(usize, usize)> {
+    let lower = text.to_ascii_lowercase();
+    let needle = format!("{attribute}=\"");
+    let position = lower.find(&needle)?;
+    Some((position, position + needle.len()))
+}
+
+/// Fetch a complete body (up to 2 MiB) with one request, for the HTML probe.
+async fn fetch_url_bytes(target: &SpeedTarget) -> anyhow::Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+
+    let mut stream = match target.proxy_port {
+        Some(proxy_port) => TcpStream::connect(format!("127.0.0.1:{proxy_port}")).await?,
+        None => TcpStream::connect(format!("{}:{}", target.host, target.port)).await?,
+    };
+
+    if target.is_https {
+        if target.proxy_port.is_some() {
+            stream
+                .write_all(
+                    format!(
+                        "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n",
+                        target.host, target.port, target.host, target.port
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+            let mut head = BytesMut::with_capacity(512);
+            loop {
+                let n = stream.read_buf(&mut head).await?;
+                if n == 0 {
+                    anyhow::bail!("proxy closed the connection during CONNECT");
+                }
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if head.len() > 8192 {
+                    anyhow::bail!("proxy CONNECT response too large");
+                }
+            }
+            if !head.starts_with(b"HTTP/1.1 200") && !head.starts_with(b"HTTP/1.0 200") {
+                anyhow::bail!("proxy CONNECT rejected");
+            }
+        }
+        let connector = tokio_rustls::TlsConnector::from(Arc::clone(&TLS_CONFIG));
+        let server_name = rustls::pki_types::ServerName::try_from(target.host.as_str())
+            .map_err(|_| anyhow::anyhow!("Invalid DNS name: {}", target.host))?
+            .to_owned();
+        let mut tls = connector.connect(server_name, stream).await?;
+        tls.write_all(
+            format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
+                target.path_and_query, target.host
+            )
+            .as_bytes(),
+        )
+        .await?;
+        ensure_success(&mut tls, true).await?;
+        let mut body = Vec::with_capacity(64 * 1024);
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let n = tls.read(&mut chunk).await?;
+            if n == 0 || body.len() >= 2 * 1024 * 1024 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        Ok(body)
+    } else {
+        let request = if target.proxy_port.is_some() {
+            format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
+                target.url, target.host
+            )
+        } else {
+            format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n",
+                target.path_and_query, target.host
+            )
+        };
+        stream.write_all(request.as_bytes()).await?;
+        ensure_success(&mut stream, true).await?;
+        let mut body = Vec::with_capacity(64 * 1024);
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 || body.len() >= 2 * 1024 * 1024 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        Ok(body)
+    }
+}
+
+/// One parallel stream. Pulls the next URL from a shared queue and
+/// re-requests payloads whenever a response ends, so the sampler keeps
+/// receiving data for the whole window even on fast links. A URL queue with
+/// several entries means the target was an HTML page and the entries are its
+/// resources; a single entry loops the same file over and over.
 async fn download_worker(
-    target: SpeedTarget,
+    targets: Arc<Vec<SpeedTarget>>,
+    queue: Arc<std::sync::Mutex<std::collections::VecDeque<usize>>>,
     total: Arc<std::sync::atomic::AtomicU64>,
     stop: Arc<std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<()> {
+    failure: Arc<std::sync::Mutex<Option<std::string::String>>>,
+) {
     use std::sync::atomic::Ordering;
 
+    let mut consecutive_failures: u32 = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        // A hard error (rejected request, broken TLS) ends this stream; the
-        // sampler decides whether the run as a whole produced anything.
-        stream_once(&target, &total, &stop).await?;
+        let index = {
+            let mut pending = match queue.lock() {
+                Ok(guard) => guard,
+                Err(_) => break,
+            };
+            if pending.is_empty() {
+                // Refill with every known URL: a plain file target loops the
+                // same entry, a page keeps re-downloading its resources.
+                pending.extend(0..targets.len());
+            }
+            pending.pop_front()
+        };
+        let Some(index) = index else { break };
+        match stream_once(&targets[index], &total, &stop).await {
+            Ok(()) => consecutive_failures = 0,
+            Err(error) => {
+                if let Ok(mut slot) = failure.lock()
+                    && slot.is_none()
+                {
+                    *slot = Some(format!("{error:#}"));
+                }
+                consecutive_failures += 1;
+                // Tolerate flaky resources (404s, dead CDNs); three in a row
+                // means this worker's route is broken, so stop it.
+                if consecutive_failures >= 3 {
+                    break;
+                }
+            }
+        }
     }
-    Ok(())
 }
 
 /// A single request/response cycle: connect, request, verify the status line,
@@ -468,7 +668,7 @@ async fn stream_once(
             .as_bytes(),
         )
         .await?;
-        let leftover = ensure_success(&mut tls).await?;
+        let leftover = ensure_success(&mut tls, false).await?;
         if !leftover.is_empty() {
             total.fetch_add(leftover.len() as u64, Ordering::Relaxed);
         }
@@ -482,7 +682,7 @@ async fn stream_once(
             )
         };
         stream.write_all(request.as_bytes()).await?;
-        let leftover = ensure_success(&mut stream).await?;
+        let leftover = ensure_success(&mut stream, false).await?;
         if !leftover.is_empty() {
             total.fetch_add(leftover.len() as u64, Ordering::Relaxed);
         }
@@ -495,7 +695,7 @@ async fn stream_once(
 /// `bytes=` value) or a pasted website URL surfaces as a clear error instead
 /// of a silent 0 B/s. Returns the body bytes already buffered after the
 /// header block.
-async fn ensure_success<S>(stream: &mut S) -> anyhow::Result<Vec<u8>>
+async fn ensure_success<S>(stream: &mut S, allow_html: bool) -> anyhow::Result<Vec<u8>>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
@@ -541,7 +741,7 @@ where
     }
 
     let header_text = std::string::String::from_utf8_lossy(&header_part).to_ascii_lowercase();
-    if header_text.contains("text/html") {
+    if !allow_html && header_text.contains("text/html") {
         anyhow::bail!(
             "该地址返回的是网页而不是可下载的文件，请填写文件直链（如 https://proof.ovh.net/files/100Mb.dat）"
         );
