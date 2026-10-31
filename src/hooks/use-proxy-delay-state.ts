@@ -5,6 +5,7 @@ import { useVerge } from '@/hooks/use-verge'
 import delayManager, { type DelayUpdate } from '@/services/delay'
 import speedManager, {
   DEFAULT_SPEED_TEST_URL,
+  extractErrorMessage,
   SPEED_TEST_WINDOW_MS,
   type SpeedUpdate,
 } from '@/services/speed'
@@ -142,7 +143,7 @@ export function useProxyDelayState(
         downloaded: 0,
         elapsed: 0,
         updatedAt: Date.now(),
-        error: error instanceof Error ? error.message : String(error),
+        error: extractErrorMessage(error),
       })
     }
   })

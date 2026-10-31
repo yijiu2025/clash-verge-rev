@@ -151,10 +151,31 @@ class SpeedManager {
         peak: 0,
         downloaded: 0,
         elapsed: 0,
-        error: error instanceof Error ? error.message : String(error),
+        error: extractErrorMessage(error),
       })
     }
   }
+}
+
+/**
+ * Tauri rejects with a structured `{ code?, detail, operation? }` object, a
+ * plain string, or an Error depending on the failure path — pick the human
+ * message out of whichever shape arrives.
+ */
+export function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object' && 'detail' in error) {
+    const detail = (error as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+  }
+  try {
+    const json = JSON.stringify(error)
+    if (json && json !== '{}') return json
+  } catch {
+    // fall through
+  }
+  return String(error)
 }
 
 export default new SpeedManager()
