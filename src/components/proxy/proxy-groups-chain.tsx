@@ -92,7 +92,7 @@ interface ProxyGroupsChainProps {
 
   // Shared callbacks
   onCheckAll: (groupName: string) => void
-  onCheckSpeed?: (groupName: string) => void
+  onCheckSpeed?: (groupName: string, testUrl?: string) => void
   speedScan?: {
     groupName: string
     running: boolean
@@ -256,7 +256,7 @@ function ProxyVirtualList({
   measureElement: (node: Element | null) => void
   onLocation: (group: any) => void
   onCheckAll: (groupName: string) => void
-  onCheckSpeed?: (groupName: string) => void
+  onCheckSpeed?: (groupName: string, testUrl?: string) => void
   speedScan?: {
     groupName: string
     running: boolean

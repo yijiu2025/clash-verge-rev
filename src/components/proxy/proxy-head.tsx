@@ -39,7 +39,7 @@ interface Props {
   headState: HeadState
   onLocation: () => void
   onCheckDelay: () => void
-  onCheckSpeed?: () => void
+  onCheckSpeed?: (groupName: string, testUrl?: string) => void
   speedScan?: { running: boolean; done: number; total: number }
   onHeadState: (val: Partial<HeadState>) => void
 }
@@ -125,9 +125,11 @@ export const ProxyHead = ({
           title={
             speedScan?.running
               ? `${t('proxies.page.tooltips.speedCheckCancel')} ${speedScan.done}/${speedScan.total}`
-              : t('proxies.page.tooltips.speedCheck')
+              : testUrl?.trim()
+                ? t('proxies.page.tooltips.speedCheckUrl')
+                : t('proxies.page.tooltips.speedCheck')
           }
-          onClick={onCheckSpeed}
+          onClick={() => onCheckSpeed(groupName, testUrl?.trim() || undefined)}
         >
           {speedScan?.running ? (
             <CircularProgress size={16} color="inherit" />

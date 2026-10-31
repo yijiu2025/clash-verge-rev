@@ -164,57 +164,65 @@ function useProxyRenderState(
   >(undefined)
   const speedScanRef = useRef({ running: false, cancel: false })
 
-  const handleCheckSpeed = useStableCallback(async (groupName: string) => {
-    // 已经在跑：再点一次当作「取消」
-    if (speedScanRef.current.running) {
-      speedScanRef.current.cancel = true
-      return
-    }
-
-    const group =
-      proxyView?.groups.find(({ name }) => name === groupName) ??
-      (proxyView?.global?.name === groupName ? proxyView.global : undefined)
-    const members =
-      proxyView && group
-        ? group.members
-            .map((member) => resolveMember(proxyView, member))
-            .filter(isInteractableMember)
-        : []
-
-    // 只测已经测得出延迟的节点：Timeout 的节点再花 10 秒只会得到同样的失败。
-    const alive = members.filter((member) => {
-      const now = delayManager.getDelayUpdate(member.ref.name, groupName)?.delay
-      const delay = now ?? delayManager.getDelayFix(member, groupName)
-      return delay > 0
-    })
-    const list = alive.length > 0 ? alive : members
-    if (list.length === 0) return
-
-    const url = verge?.speed_test_url || DEFAULT_SPEED_TEST_URL
-    speedScanRef.current = { running: true, cancel: false }
-    setSpeedScan({ groupName, running: true, done: 0, total: list.length })
-
-    try {
-      for (let i = 0; i < list.length; i += 1) {
-        if (speedScanRef.current.cancel) break
-        await speedManager.checkSpeed(
-          list[i].ref.name,
-          groupName,
-          url,
-          SPEED_TEST_WINDOW_MS,
-        )
-        setSpeedScan({
-          groupName,
-          running: true,
-          done: i + 1,
-          total: list.length,
-        })
+  const handleCheckSpeed = useStableCallback(
+    async (groupName: string, customUrl?: string) => {
+      // 已经在跑：再点一次当作「取消」
+      if (speedScanRef.current.running) {
+        speedScanRef.current.cancel = true
+        return
       }
-    } finally {
-      speedScanRef.current.running = false
-      setSpeedScan(undefined)
-    }
-  })
+
+      const group =
+        proxyView?.groups.find(({ name }) => name === groupName) ??
+        (proxyView?.global?.name === groupName ? proxyView.global : undefined)
+      const members =
+        proxyView && group
+          ? group.members
+              .map((member) => resolveMember(proxyView, member))
+              .filter(isInteractableMember)
+          : []
+
+      // 只测已经测得出延迟的节点：Timeout 的节点再花 10 秒只会得到同样的失败。
+      const alive = members.filter((member) => {
+        const now = delayManager.getDelayUpdate(
+          member.ref.name,
+          groupName,
+        )?.delay
+        const delay = now ?? delayManager.getDelayFix(member, groupName)
+        return delay > 0
+      })
+      const list = alive.length > 0 ? alive : members
+      if (list.length === 0) return
+
+      // 工具栏输入框里填了地址就优先用它（即「在这里输入测速地址，点测速」）；
+      // 否则回落到设置页的测速源，最后是内置默认。
+      const url =
+        customUrl?.trim() || verge?.speed_test_url || DEFAULT_SPEED_TEST_URL
+      speedScanRef.current = { running: true, cancel: false }
+      setSpeedScan({ groupName, running: true, done: 0, total: list.length })
+
+      try {
+        for (let i = 0; i < list.length; i += 1) {
+          if (speedScanRef.current.cancel) break
+          await speedManager.checkSpeed(
+            list[i].ref.name,
+            groupName,
+            url,
+            SPEED_TEST_WINDOW_MS,
+          )
+          setSpeedScan({
+            groupName,
+            running: true,
+            done: i + 1,
+            total: list.length,
+          })
+        }
+      } finally {
+        speedScanRef.current.running = false
+        setSpeedScan(undefined)
+      }
+    },
+  )
 
   const saveScrollPosition = useCallback(
     (scrollTop: number) => {

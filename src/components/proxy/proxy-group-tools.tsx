@@ -40,7 +40,7 @@ interface Props {
   headState: HeadState
   onLocation: () => void
   onCheckDelay: () => void
-  onCheckSpeed?: () => void
+  onCheckSpeed?: (groupName: string, testUrl?: string) => void
   speedScan?: { running: boolean; done: number; total: number }
   onHeadState: (val: Partial<HeadState>) => void
 }
@@ -204,12 +204,14 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
           title={
             speedScan?.running
               ? `${t('proxies.page.tooltips.speedCheckCancel')} ${speedScan.done}/${speedScan.total}`
-              : t('proxies.page.tooltips.speedCheck')
+              : headState.testUrl?.trim()
+                ? t('proxies.page.tooltips.speedCheckUrl')
+                : t('proxies.page.tooltips.speedCheck')
           }
           onClick={(e) => {
             e.preventDefault()
             e.stopPropagation()
-            onCheckSpeed()
+            onCheckSpeed(groupName, headState.testUrl?.trim() || undefined)
           }}
         >
           {speedScan?.running ? (
