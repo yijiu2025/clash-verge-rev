@@ -35,6 +35,13 @@ interface RenderProps {
   isChainMode?: boolean
   onLocation: (group: IRenderItem['group']) => void
   onCheckAll: (groupName: string) => void
+  onCheckSpeed?: (groupName: string) => void
+  speedScan?: {
+    groupName: string
+    running: boolean
+    done: number
+    total: number
+  }
   onHeadState: (groupName: string, patch: Partial<HeadState>) => void
   onChangeProxy: (
     group: IRenderItem['group'],
@@ -50,6 +57,8 @@ export const ProxyRender = memo(function ProxyRender(props: RenderProps) {
     stickyed = false,
     onLocation,
     onCheckAll,
+    onCheckSpeed,
+    speedScan,
     onHeadState,
     onChangeProxy,
     onGroupToggle,
@@ -203,6 +212,14 @@ export const ProxyRender = memo(function ProxyRender(props: RenderProps) {
           headState={headState!}
           onLocation={() => onLocation(group)}
           onCheckDelay={() => onCheckAll(group.name)}
+          onCheckSpeed={
+            onCheckSpeed ? () => onCheckSpeed(group.name) : undefined
+          }
+          speedScan={
+            speedScan && speedScan.groupName === group.name
+              ? speedScan
+              : undefined
+          }
           onHeadState={(p) => onHeadState(group.name, p)}
         />
         {!toolsOnLeft && proxyCount}
@@ -252,6 +269,12 @@ export const ProxyRender = memo(function ProxyRender(props: RenderProps) {
         headState={headState!}
         onLocation={() => onLocation(group)}
         onCheckDelay={() => onCheckAll(group.name)}
+        onCheckSpeed={onCheckSpeed ? () => onCheckSpeed(group.name) : undefined}
+        speedScan={
+          speedScan && speedScan.groupName === group.name
+            ? speedScan
+            : undefined
+        }
         onHeadState={(p) => onHeadState(group.name, p)}
       />
     )

@@ -24,6 +24,10 @@ import { useProxySelection } from '@/hooks/use-proxy-selection'
 import { useVerge } from '@/hooks/use-verge'
 import { useProxiesData, useSystemData } from '@/providers/app-data-context'
 import delayManager from '@/services/delay'
+import speedManager, {
+  DEFAULT_SPEED_TEST_URL,
+  SPEED_TEST_WINDOW_MS,
+} from '@/services/speed'
 import {
   isInteractableMember,
   resolveMember,
@@ -147,6 +151,71 @@ function useProxyRenderState(
     }),
   )
 
+  // 全组测速：延迟探测是逐节点并行的，带宽测量必须串行——每次都要把一个节点
+  // 在它的 selector 组里选中，测完再恢复，同时跑多个会互相抢规则里的当前节点。
+  const [speedScan, setSpeedScan] = useState<
+    | {
+        groupName: string
+        running: boolean
+        done: number
+        total: number
+      }
+    | undefined
+  >(undefined)
+  const speedScanRef = useRef({ running: false, cancel: false })
+
+  const handleCheckSpeed = useStableCallback(async (groupName: string) => {
+    // 已经在跑：再点一次当作「取消」
+    if (speedScanRef.current.running) {
+      speedScanRef.current.cancel = true
+      return
+    }
+
+    const group =
+      proxyView?.groups.find(({ name }) => name === groupName) ??
+      (proxyView?.global?.name === groupName ? proxyView.global : undefined)
+    const members =
+      proxyView && group
+        ? group.members
+            .map((member) => resolveMember(proxyView, member))
+            .filter(isInteractableMember)
+        : []
+
+    // 只测已经测得出延迟的节点：Timeout 的节点再花 10 秒只会得到同样的失败。
+    const alive = members.filter((member) => {
+      const now = delayManager.getDelayUpdate(member.ref.name, groupName)?.delay
+      const delay = now ?? delayManager.getDelayFix(member, groupName)
+      return delay > 0
+    })
+    const list = alive.length > 0 ? alive : members
+    if (list.length === 0) return
+
+    const url = verge?.speed_test_url || DEFAULT_SPEED_TEST_URL
+    speedScanRef.current = { running: true, cancel: false }
+    setSpeedScan({ groupName, running: true, done: 0, total: list.length })
+
+    try {
+      for (let i = 0; i < list.length; i += 1) {
+        if (speedScanRef.current.cancel) break
+        await speedManager.checkSpeed(
+          list[i].ref.name,
+          groupName,
+          url,
+          SPEED_TEST_WINDOW_MS,
+        )
+        setSpeedScan({
+          groupName,
+          running: true,
+          done: i + 1,
+          total: list.length,
+        })
+      }
+    } finally {
+      speedScanRef.current.running = false
+      setSpeedScan(undefined)
+    }
+  })
+
   const saveScrollPosition = useCallback(
     (scrollTop: number) => {
       const scrollPositions = localStorage.getItem('proxy-scroll-positions')
@@ -184,6 +253,8 @@ function useProxyRenderState(
     onProxies,
     onHeadState,
     handleCheckAll,
+    handleCheckSpeed,
+    speedScan,
     saveScrollPosition,
     getScrollPosition,
   }
@@ -218,6 +289,8 @@ function ChainProxyGroups(props: {
     renderList,
     onHeadState,
     handleCheckAll,
+    handleCheckSpeed,
+    speedScan,
     getScrollPosition,
     saveScrollPosition,
   } = useProxyRenderState(mode, true, activeSelectedGroup)
@@ -360,6 +433,8 @@ function ChainProxyGroups(props: {
         activeStickyIndex={activeStickyIndex}
         measureElement={virtualizer.measureElement}
         onCheckAll={handleCheckAll}
+        onCheckSpeed={handleCheckSpeed}
+        speedScan={speedScan}
         onHeadState={onHeadState}
         onLocation={handleLocation}
         onGroupSelect={setSelectedGroup}
@@ -378,6 +453,8 @@ function NormalProxyGroups(props: { mode: string }) {
     onProxies,
     onHeadState,
     handleCheckAll,
+    handleCheckSpeed,
+    speedScan,
     getScrollPosition,
     saveScrollPosition,
   } = useProxyRenderState(mode, false, null)
@@ -553,6 +630,8 @@ function NormalProxyGroups(props: { mode: string }) {
         stickyed={stickyed}
         onLocation={handleLocation}
         onCheckAll={handleCheckAll}
+        onCheckSpeed={handleCheckSpeed}
+        speedScan={speedScan}
         onHeadState={async (groupName, patch) => {
           if (stickyed && patch.filterText !== undefined) {
             handleGroupLocationByName(groupName)
@@ -567,6 +646,8 @@ function NormalProxyGroups(props: { mode: string }) {
     [
       handleChangeProxy,
       handleCheckAll,
+      handleCheckSpeed,
+      speedScan,
       onHeadState,
       handleLocation,
       handleGroupToggle,
@@ -581,11 +662,20 @@ function NormalProxyGroups(props: { mode: string }) {
         item={item}
         onLocation={handleLocation}
         onCheckAll={handleCheckAll}
+        onCheckSpeed={handleCheckSpeed}
+        speedScan={speedScan}
         onHeadState={onHeadState}
         onChangeProxy={handleChangeProxy}
       />
     ),
-    [handleChangeProxy, handleCheckAll, onHeadState, handleLocation],
+    [
+      handleChangeProxy,
+      handleCheckAll,
+      handleCheckSpeed,
+      speedScan,
+      onHeadState,
+      handleLocation,
+    ],
   )
 
   if (!hasRenderableItems(renderList)) return emptyList

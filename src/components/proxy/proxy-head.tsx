@@ -4,6 +4,7 @@ import {
   NetworkCheckRounded,
   SearchOffRounded,
   SearchRounded,
+  SpeedRounded,
   VisibilityRounded,
   VisibilityOffRounded,
   WifiTetheringRounded,
@@ -11,7 +12,13 @@ import {
   SortByAlphaRounded,
   SortRounded,
 } from '@mui/icons-material'
-import { Box, IconButton, TextField, type SxProps } from '@mui/material'
+import {
+  Box,
+  CircularProgress,
+  IconButton,
+  TextField,
+  type SxProps,
+} from '@mui/material'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -32,6 +39,8 @@ interface Props {
   headState: HeadState
   onLocation: () => void
   onCheckDelay: () => void
+  onCheckSpeed?: () => void
+  speedScan?: { running: boolean; done: number; total: number }
   onHeadState: (val: Partial<HeadState>) => void
 }
 
@@ -45,6 +54,8 @@ export const ProxyHead = ({
   onHeadState,
   onLocation,
   onCheckDelay,
+  onCheckSpeed,
+  speedScan,
 }: Props) => {
   const {
     showType,
@@ -106,6 +117,25 @@ export const ProxyHead = ({
       >
         <NetworkCheckRounded />
       </IconButton>
+
+      {onCheckSpeed && (
+        <IconButton
+          size="small"
+          color="inherit"
+          title={
+            speedScan?.running
+              ? `${t('proxies.page.tooltips.speedCheckCancel')} ${speedScan.done}/${speedScan.total}`
+              : t('proxies.page.tooltips.speedCheck')
+          }
+          onClick={onCheckSpeed}
+        >
+          {speedScan?.running ? (
+            <CircularProgress size={16} color="inherit" />
+          ) : (
+            <SpeedRounded />
+          )}
+        </IconButton>
+      )}
 
       <IconButton
         size="small"

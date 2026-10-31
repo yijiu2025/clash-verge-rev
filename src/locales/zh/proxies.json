@@ -35,6 +35,8 @@
       "sortDelay": "按延迟排序",
       "sortName": "按名称排序",
       "delayCheckUrl": "延迟测试链接",
+      "speedCheck": "全组测速（逐个节点，会临时切换）",
+      "speedCheckCancel": "测速中，点击取消",
       "showBasic": "隐藏节点细节",
       "showDetail": "展示节点细节",
       "filter": "过滤节点"

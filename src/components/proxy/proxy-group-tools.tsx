@@ -5,11 +5,18 @@ import SearchOffRounded from '@mui/icons-material/SearchOffRounded'
 import SearchRounded from '@mui/icons-material/SearchRounded'
 import SortByAlphaRounded from '@mui/icons-material/SortByAlphaRounded'
 import SortRounded from '@mui/icons-material/SortRounded'
+import SpeedRounded from '@mui/icons-material/SpeedRounded'
 import VisibilityOffRounded from '@mui/icons-material/VisibilityOffRounded'
 import VisibilityRounded from '@mui/icons-material/VisibilityRounded'
 import WifiTetheringOffRounded from '@mui/icons-material/WifiTetheringOffRounded'
 import WifiTetheringRounded from '@mui/icons-material/WifiTetheringRounded'
-import { Box, IconButton, type SxProps, TextField } from '@mui/material'
+import {
+  Box,
+  CircularProgress,
+  IconButton,
+  type SxProps,
+  TextField,
+} from '@mui/material'
 import { useDebounceFn } from 'ahooks'
 import { memo, useEffect, useRef } from 'react'
 import { flushSync } from 'react-dom'
@@ -33,6 +40,8 @@ interface Props {
   headState: HeadState
   onLocation: () => void
   onCheckDelay: () => void
+  onCheckSpeed?: () => void
+  speedScan?: { running: boolean; done: number; total: number }
   onHeadState: (val: Partial<HeadState>) => void
 }
 
@@ -44,6 +53,8 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
     groupName,
     headState,
     onCheckDelay,
+    onCheckSpeed,
+    speedScan,
     onHeadState,
     onLocation,
   } = props
@@ -185,6 +196,29 @@ export const ProxyGroupTools = memo(function ProxyGroupTools(props: Props) {
       >
         <NetworkCheckRounded fontSize="inherit" />
       </IconButton>
+
+      {onCheckSpeed && (
+        <IconButton
+          size="small"
+          color="inherit"
+          title={
+            speedScan?.running
+              ? `${t('proxies.page.tooltips.speedCheckCancel')} ${speedScan.done}/${speedScan.total}`
+              : t('proxies.page.tooltips.speedCheck')
+          }
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            onCheckSpeed()
+          }}
+        >
+          {speedScan?.running ? (
+            <CircularProgress size={16} color="inherit" />
+          ) : (
+            <SpeedRounded fontSize="inherit" />
+          )}
+        </IconButton>
+      )}
 
       <IconButton
         size="small"

@@ -35,6 +35,8 @@
       "sortDelay": "Sort by delay",
       "sortName": "Sort by name",
       "delayCheckUrl": "Delay check URL",
+      "speedCheck": "Speed test all nodes (temporarily switches node)",
+      "speedCheckCancel": "Speed testing, click to cancel",
       "showBasic": "Proxy basic",
       "showDetail": "Proxy detail",
       "filter": "Filter"
