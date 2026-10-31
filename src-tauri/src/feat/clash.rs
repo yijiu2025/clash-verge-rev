@@ -416,6 +416,7 @@ async fn stream_once(
     total: &std::sync::atomic::AtomicU64,
     stop: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<()> {
+    use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpStream;
 
@@ -467,7 +468,10 @@ async fn stream_once(
             .as_bytes(),
         )
         .await?;
-        ensure_success(&mut tls).await?;
+        let leftover = ensure_success(&mut tls).await?;
+        if !leftover.is_empty() {
+            total.fetch_add(leftover.len() as u64, Ordering::Relaxed);
+        }
         pump_bytes(&mut tls, total, stop).await
     } else {
         let request = if proxy_port.is_some() {
@@ -478,44 +482,72 @@ async fn stream_once(
             )
         };
         stream.write_all(request.as_bytes()).await?;
-        ensure_success(&mut stream).await?;
+        let leftover = ensure_success(&mut stream).await?;
+        if !leftover.is_empty() {
+            total.fetch_add(leftover.len() as u64, Ordering::Relaxed);
+        }
         pump_bytes(&mut stream, total, stop).await
     }
 }
 
-/// Read the status line and reject non-2xx responses, so a refused request
-/// (e.g. Cloudflare rejecting an oversized `bytes=` value) surfaces as a clear
-/// error instead of a silent 0 B/s.
-async fn ensure_success<S>(stream: &mut S) -> anyhow::Result<()>
+/// Read the status line and response headers; reject non-2xx responses and
+/// HTML pages, so a refused request (e.g. Cloudflare rejecting an oversized
+/// `bytes=` value) or a pasted website URL surfaces as a clear error instead
+/// of a silent 0 B/s. Returns the body bytes already buffered after the
+/// header block.
+async fn ensure_success<S>(stream: &mut S) -> anyhow::Result<Vec<u8>>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
     use tokio::io::AsyncReadExt as _;
 
-    let mut head = BytesMut::with_capacity(1024);
+    let mut head = BytesMut::with_capacity(2048);
     loop {
         let n = stream.read_buf(&mut head).await?;
         if n == 0 {
             anyhow::bail!("测速地址未返回响应就关闭了连接");
         }
-        if head.windows(2).any(|w| w == b"\r\n") {
+        if head.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
-        if head.len() > 8192 {
+        if head.len() > 16 * 1024 {
             anyhow::bail!("测速地址响应头过大");
         }
     }
 
-    let first_line = head.as_ref().split(|byte| *byte == b'\n').next().unwrap_or(&[]);
+    // Split off everything after the blank line: the body prefix stays here
+    // while the upper part is parsed as the status line plus headers.
+    let (header_part, body_prefix) = match head
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+    {
+        Some(split) => {
+            let rest = head.split_off(split);
+            (head.to_vec(), rest.to_vec())
+        }
+        None => (head.to_vec(), Vec::new()),
+    };
+
+    let first_line = header_part.split(|byte| *byte == b'\n').next().unwrap_or(&[]);
     let status = std::str::from_utf8(first_line)
         .ok()
         .and_then(|text| text.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok());
     match status {
-        Some(code) if (200..300).contains(&code) => Ok(()),
+        Some(code) if (200..300).contains(&code) => {}
         Some(code) => anyhow::bail!("测速地址返回 HTTP {code}，请在设置中更换测速地址"),
         None => anyhow::bail!("无法解析测速地址的响应状态"),
     }
+
+    let header_text = std::string::String::from_utf8_lossy(&header_part).to_ascii_lowercase();
+    if header_text.contains("text/html") {
+        anyhow::bail!(
+            "该地址返回的是网页而不是可下载的文件，请填写文件直链（如 https://proof.ovh.net/files/100Mb.dat）"
+        );
+    }
+
+    Ok(body_prefix)
 }
 
 /// Drain the response body, accumulating the byte count until stopped.
