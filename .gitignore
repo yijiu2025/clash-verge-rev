@@ -17,3 +17,7 @@ target
 .vfox
 .claude
 .zed
+
+# Visual Studio folder-view artifacts
+.vs/
+CppProperties.json
